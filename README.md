@@ -4,7 +4,7 @@ This repository contains simulation and analysis tools for studying nanoscale me
 The goal is to reproduce and explore periodic nanostructured “code mask” designs that control optical transmission spectra for applications in computational optics and nanophotonic signal encoding.
 
 ## Structure
-* **rcw_grad/** – RCWA simulation engine (external repository)
+* **rcw_grad/** – RCWA simulation engine (external repository) / Maxwell's Equation Solver
 * **scripts/** – custom simulation and analysis scripts
 * **geometry/** – unit cell and metasurface design definitions
 * **results/** – generated transmission spectra and data outputs
