@@ -20,6 +20,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RCW_GRAD_ROOT = PROJECT_ROOT / "rcw_grad"
 RESULTS_DIR = PROJECT_ROOT / "results" / "fig2"
+PHASE_OUTPUT_STEM = "fig2_transmission_phase"
 
 
 def _add_import_paths() -> None:
@@ -117,7 +118,33 @@ def _assemble_rcwa_object(
     return obj, frequency
 
 
-def run_sweep(
+def _complex_transmission_amplitude(rcwa_module: Any, obj: Any, order: int = 0) -> complex:
+    """Return the transmitted zero-order complex amplitude relative to incidence."""
+    # Extract the outgoing modal amplitudes before the Poynting-flux calculation
+    # in RT_Solve converts fields into reflection/transmission intensities.
+    aN, _b0 = rcwa_module.SolveExterior(
+        obj.a0,
+        obj.bN,
+        obj.q_list,
+        obj.phi_list,
+        obj.kp_list,
+        obj.thickness_list,
+    )
+    candidate_indices = (order, order + obj.nG)
+    incident_amplitudes = np.asarray([obj.a0[index] for index in candidate_indices])
+    if not np.any(np.abs(incident_amplitudes) > 0.0):
+        raise ValueError(f"No incident amplitude found for diffraction order {order}")
+
+    polarization_index = candidate_indices[int(np.argmax(np.abs(incident_amplitudes)))]
+    # The complex transmission coefficient is the outgoing transmitted field
+    # amplitude divided by the incident field amplitude for the same RCWA order
+    # and polarization component. Intensity transmission below is computed
+    # separately from Poynting flux, so it is generally not just |t|^2 when
+    # impedances or additional diffraction orders contribute.
+    return complex(aN[polarization_index] / obj.a0[polarization_index])
+
+
+def run_sweep_with_phase(
     diameter_nm: float,
     grid_shape: tuple[int, int],
     wavelength_start_nm: float,
@@ -125,14 +152,15 @@ def run_sweep(
     num_wavelengths: int,
     nG: int,
     q_ref: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     if num_wavelengths < 1:
         raise ValueError("num_wavelengths must be at least 1")
 
     rcwa_module = _load_rcwa_module()
     geometry_payload = build_unit_cell_geometry(diameter_nm=diameter_nm, grid_shape=grid_shape)
     wavelengths_nm = np.linspace(wavelength_start_nm, wavelength_stop_nm, num_wavelengths)
-    rows = []
+    spectrum_rows = []
+    transmission_amplitudes = []
 
     for wavelength_nm in wavelengths_nm:
         obj, frequency = _assemble_rcwa_object(
@@ -143,7 +171,9 @@ def run_sweep(
             q_ref=q_ref,
         )
         reflection, transmission = obj.RT_Solve(normalize=1)
-        rows.append(
+        transmission_amplitude = _complex_transmission_amplitude(rcwa_module, obj)
+        transmission_amplitudes.append(transmission_amplitude)
+        spectrum_rows.append(
             (
                 float(wavelength_nm),
                 float(np.real(frequency)),
@@ -153,7 +183,43 @@ def run_sweep(
             )
         )
 
-    return np.asarray(rows, dtype=float)
+    spectrum = np.asarray(spectrum_rows, dtype=float)
+    transmission_amplitudes_array = np.asarray(transmission_amplitudes, dtype=complex)
+    # Phase is computed from the complex transmission coefficient and unwrapped
+    # along wavelength to avoid artificial +/-pi discontinuities.
+    phase_rad = np.angle(transmission_amplitudes_array)
+    phase_unwrapped_rad = np.unwrap(phase_rad)
+    phase_rows = np.column_stack(
+        (
+            wavelengths_nm,
+            np.real(transmission_amplitudes_array),
+            np.imag(transmission_amplitudes_array),
+            phase_rad,
+            phase_unwrapped_rad,
+        )
+    )
+    return spectrum, phase_rows
+
+
+def run_sweep(
+    diameter_nm: float,
+    grid_shape: tuple[int, int],
+    wavelength_start_nm: float,
+    wavelength_stop_nm: float,
+    num_wavelengths: int,
+    nG: int,
+    q_ref: float,
+) -> np.ndarray:
+    spectrum, _phase = run_sweep_with_phase(
+        diameter_nm=diameter_nm,
+        grid_shape=grid_shape,
+        wavelength_start_nm=wavelength_start_nm,
+        wavelength_stop_nm=wavelength_stop_nm,
+        num_wavelengths=num_wavelengths,
+        nG=nG,
+        q_ref=q_ref,
+    )
+    return spectrum
 
 
 def save_spectrum(spectrum: np.ndarray, output_dir: Path, stem: str) -> tuple[Path, Path]:
@@ -166,6 +232,28 @@ def save_spectrum(spectrum: np.ndarray, output_dir: Path, stem: str) -> tuple[Pa
         writer = csv.writer(handle)
         writer.writerow(("wavelength_nm", "frequency_normalized", "reflection", "transmission", "residual"))
         writer.writerows(spectrum.tolist())
+
+    return npy_path, csv_path
+
+
+def save_phase_response(phase_response: np.ndarray, output_dir: Path, stem: str) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    npy_path = output_dir / f"{stem}.npy"
+    csv_path = output_dir / f"{stem}.csv"
+
+    np.save(npy_path, phase_response)
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            (
+                "wavelength_nm",
+                "transmission_amplitude_real",
+                "transmission_amplitude_imag",
+                "transmission_phase_rad",
+                "transmission_phase_unwrapped_rad",
+            )
+        )
+        writer.writerows(phase_response.tolist())
 
     return npy_path, csv_path
 
@@ -183,6 +271,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--q-ref", type=float, default=1e10)
     parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR)
     parser.add_argument("--output-stem", default="fig2_transmission_spectrum")
+    parser.add_argument("--phase-output-stem", default=PHASE_OUTPUT_STEM)
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -207,7 +296,7 @@ def main() -> None:
         print(f"  dof_size: {len(payload['rcwa_grad']['grid_layer_getdof']['dof'])}")
         return
 
-    spectrum = run_sweep(
+    spectrum, phase_response = run_sweep_with_phase(
         diameter_nm=args.diameter_nm,
         grid_shape=grid_shape,
         wavelength_start_nm=args.wavelength_start_nm,
@@ -217,8 +306,15 @@ def main() -> None:
         q_ref=args.q_ref,
     )
     npy_path, csv_path = save_spectrum(spectrum, args.output_dir, args.output_stem)
+    phase_npy_path, phase_csv_path = save_phase_response(
+        phase_response,
+        args.output_dir,
+        args.phase_output_stem,
+    )
     print(f"Saved NumPy spectrum: {npy_path}")
     print(f"Saved CSV spectrum: {csv_path}")
+    print(f"Saved NumPy phase response: {phase_npy_path}")
+    print(f"Saved CSV phase response: {phase_csv_path}")
 
 
 if __name__ == "__main__":

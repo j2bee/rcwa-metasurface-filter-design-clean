@@ -13,6 +13,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_PATH = PROJECT_ROOT / "results" / "fig2" / "fig2_transmission_spectrum.npy"
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "figures" / "fig2" / "fig2_transmission.png"
+DEFAULT_PHASE_RESULTS_PATH = PROJECT_ROOT / "results" / "fig2" / "fig2_transmission_phase.npy"
+DEFAULT_PHASE_OUTPUT_PATH = PROJECT_ROOT / "figures" / "fig2" / "fig2_transmission_phase.png"
 
 COLUMN_NAMES = (
     "wavelength_nm",
@@ -20,6 +22,13 @@ COLUMN_NAMES = (
     "reflection",
     "transmission",
     "residual",
+)
+PHASE_COLUMN_NAMES = (
+    "wavelength_nm",
+    "transmission_amplitude_real",
+    "transmission_amplitude_imag",
+    "transmission_phase_rad",
+    "transmission_phase_unwrapped_rad",
 )
 
 
@@ -47,6 +56,32 @@ def load_spectrum(path: Path) -> np.ndarray:
         raise ValueError("Spectrum must be a 2D array with at least four columns.")
 
     return spectrum
+
+
+def load_phase_response(path: Path) -> np.ndarray:
+    """Load phase data saved by scripts/run_fig2.py."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Phase results not found: {path}. "
+            "Run scripts/run_fig2.py first, or pass --phase-input to an existing .npy/.csv file."
+        )
+
+    if path.suffix == ".npy":
+        phase_response = np.load(path)
+    elif path.suffix == ".csv":
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            phase_response = np.asarray(
+                [[float(row[column]) for column in PHASE_COLUMN_NAMES] for row in reader],
+                dtype=float,
+            )
+    else:
+        raise ValueError(f"Unsupported phase format: {path.suffix}. Use .npy or .csv.")
+
+    if phase_response.ndim != 2 or phase_response.shape[1] < 5:
+        raise ValueError("Phase response must be a 2D array with at least five columns.")
+
+    return phase_response
 
 
 def load_paper_overlay(path: Path | None) -> np.ndarray | None:
@@ -129,10 +164,59 @@ def plot_transmission(
     plt.close(fig)
 
 
+def plot_transmission_phase(
+    phase_response: np.ndarray,
+    output_path: Path,
+    show: bool = False,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError("Plotting requires matplotlib. Install matplotlib and rerun this script.") from exc
+
+    wavelength_nm = phase_response[:, 0]
+    phase_unwrapped_rad = phase_response[:, 4]
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.5), constrained_layout=True)
+    ax.plot(
+        wavelength_nm,
+        phase_unwrapped_rad,
+        color="tab:purple",
+        linewidth=2.0,
+        label="RCWA zero-order transmission phase",
+    )
+
+    ax.set_title("ACS Photonics 2016 Figure 2 transmission phase")
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel("Unwrapped transmission phase (rad)")
+    ax.set_xlim(float(np.min(wavelength_nm)), float(np.max(wavelength_nm)))
+    ax.grid(True, which="major", color="0.85", linewidth=0.8)
+    ax.legend(loc="best", frameon=True)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=DEFAULT_RESULTS_PATH, help="Input spectrum .npy or .csv file.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH, help="Output figure path.")
+    parser.add_argument(
+        "--phase-input",
+        type=Path,
+        default=DEFAULT_PHASE_RESULTS_PATH,
+        help="Input phase .npy or .csv file. If present, a phase figure is also written.",
+    )
+    parser.add_argument(
+        "--phase-output",
+        type=Path,
+        default=DEFAULT_PHASE_OUTPUT_PATH,
+        help="Output phase figure path.",
+    )
+    parser.add_argument("--skip-phase", action="store_true", help="Do not generate the phase figure.")
     parser.add_argument(
         "--paper-overlay",
         type=Path,
@@ -149,6 +233,10 @@ def main() -> None:
     paper_overlay = load_paper_overlay(args.paper_overlay)
     plot_transmission(spectrum, args.output, paper_overlay=paper_overlay, show=args.show)
     print(f"Saved Figure 2 transmission plot: {args.output}")
+    if not args.skip_phase and args.phase_input.exists():
+        phase_response = load_phase_response(args.phase_input)
+        plot_transmission_phase(phase_response, args.phase_output, show=args.show)
+        print(f"Saved Figure 2 transmission phase plot: {args.phase_output}")
 
 
 if __name__ == "__main__":
